@@ -1,0 +1,185 @@
+model{
+  #  Naming
+  #  Parameter names begin with a capitalized letter
+  #  Data are all lower case
+  #  Indexing always follows - DAU, Year, Age, Sex
+  #  If fewer indices are needed they follow the same order despite
+  #   omissions
+
+  #  Priors
+  #  Recruitment - [age, sex, mean:tau]
+  R_mu ~ dnorm(log(meanr[4,1,1]/(1 - meanr[4,1,1])), meanr[4,1,2])T(-10,10)
+
+  #  Survival
+  #  Priors on survival - First age class included in R
+  #  [age, sex, mean:tau]
+  jfS_mu ~ dnorm(log(means[2,1,1]/(1 - means[2,1,1])), means[2,1,2])T(-10,10)
+  safS_mu ~ dnorm(log(means[3,1,1]/(1 - means[3,1,1])), means[3,1,2])T(-10,10)
+  samS_mu ~ dnorm(log(means[3,2,1]/(1 - means[3,2,1])), means[3,2,2])T(-10,10)
+  afS_mu ~ dnorm(log(means[4,1,1]/(1 - means[4,1,1])), means[4,1,2])T(-10,10)
+  amS_mu ~ dnorm(log(means[4,2,1]/(1 - means[4,2,1])), means[4,2,2])T(-10,10)
+
+  #  Transform probability back to real scale and use as the intercept
+  for(u in 1:ndau){
+    sdr[u] ~ dunif(0, 50)
+    taur[u] <- 1/(sdr[u]^2)
+    sdj[u] ~ dunif(0, 50)
+    tauj[u] <- 1/(sdj[u]^2)
+    sds[u] ~ dunif(0, 50)
+    taus[u] <- 1/(sds[u]^2)
+    for(yr in 1:nyr){
+      S[u,yr,1,1] <- 0
+      S[u,yr,1,2] <- 0
+      j_yr[u,yr] ~ dnorm(0, tauj[u])T(-5, 5)
+      logit(S[u,yr,2,1]) <- jfS_mu + j_yr[u,yr]
+      S[u,yr,2,2] <- S[u,yr,2,1]
+      s_yr[u,yr] ~ dnorm(0, taus[u])T(-5, 5)
+      logit(S[u,yr,3,1]) <- safS_mu + s_yr[u,yr]
+      logit(S[u,yr,3,2]) <- samS_mu + s_yr[u,yr]
+      logit(S[u,yr,4,1]) <- afS_mu
+      logit(S[u,yr,4,2]) <- amS_mu
+      r_yr[u,yr] ~ dnorm(0, taur[u])T(-5,5)
+      logit(R[u,yr]) <- R_mu + r_yr[u,yr]
+    }
+  }
+
+  ###  Prior on first year population size
+  #  Indexing - Year, Age, Sex
+  for(u in 1:ndau){
+    N[u,1,1,1] ~ dnorm(n1[1,2], 0.0001)T(0,)
+    N[u,1,1,2] <- N[u,1,1,1]
+
+    for(s in 1:2){
+      N[u,1,2,s] ~ dnorm(n1[2,s+1], 1/(20 * n1[2,s+1]))T(0,)
+      N[u,1,3,s] ~ dnorm(n1[3,s+1], 1/(20 * n1[3,s+1]))T(0,)
+      N[u,1,4,s] ~ dnorm(n1[4,s+1], 1/(20 * n1[4,s+1]))T(0,)
+    }
+
+    yN[u,1] <- N[u,1,1,1] + N[u,1,1,2]
+    frat[u,1] <- N[u,1,3,1] + N[u,1,4,1]
+    totF[u,1] <- N[u,1,1,1] + N[u,1,2,1] + frat[u,1]
+    totM[u,1] <- N[u,1,1,2] + N[u,1,2,2] + N[u,1,3,2] + N[u,1,4,2]
+    totN[u,1] <- totF[u,1] + totM[u,1]
+  }
+
+  ###  Process model - 4 ages, 2 sex
+  #  Using normal approximation because it is fast and mixes well
+  #  Sex = 1 is a female
+  #  Indexing follows - DAU, Year, Age, Sex
+  for(u in 1:ndau){
+    for(yr in 2:nyr){
+      #  Calves
+      #  Normal approximation of Poisson
+      nMu[u,yr,1,1] <- (frat[u,yr] * R[u,yr] * 0.5)
+      nMu[u,yr,1,2] <- nMu[u,yr,1,1]
+
+      N[u,yr,1,1] ~ dnorm(nMu[u,yr,1,1], 1/abs(nMu[u,yr,1,1]))
+      N[u,yr,1,2] ~ dnorm(nMu[u,yr,1,2], 1/abs(nMu[u,yr,1,2]))
+
+      for(s in 1:2){
+        #  Juveniles - 6 - 18 months of age
+        #  Normal approximation of Binomial
+        nMu[u,yr,2,s] <- N[u,yr-1,1,s] * S[u,yr-1,2,s] - harv[u,yr,2,s]
+
+        nTau[u,yr,2,s] <-
+          1/abs((N[u,yr-1,1,s] + 1) * (S[u,yr-1,2,s] * (1 - S[u,yr-1,2,s])))
+
+        N[u,yr,2,s] ~ dnorm(nMu[u,yr,2,s], nTau[u,yr,2,s])T(0,)
+        
+        #  SubAdults
+        #  Normal approximation of Binomial
+        # *** Changed definition of harv (changed S to J, added *S*reinadj)
+        nMu[u,yr,3,s] <- N[u,yr-1,2,s] * S[u,yr-1,3,s] - harv[u,yr,2,s] * S[u,yr-1,3,s] * PTSD
+
+        nTau[u,yr,3,s] <-
+          1/abs((N[u,yr-1,2,s] + 1) * S[u,yr-1,3,s] * (1 - S[u,yr-1,3,s]))
+
+        N[u,yr,3,s] ~ dnorm(nMu[u,yr,3,s], nTau[u,yr,3,s])T(0,)
+
+        #  Adults
+        #  Normal approximation of Binomial
+        nMu[u,yr,4,s] <- (N[u,yr-1,4,s] + N[u,yr-1,3,s]) * S[u,yr-1,4,s] - harv[u,yr,4,s]
+
+        nTau[u,yr,4,s] <-
+          1/abs((N[u,yr-1,4,s] + N[u,yr-1,3,s] + 1) * S[u,yr-1,4,s] * (1 - S[u,yr-1,4,s]))
+
+        N[u,yr,4,s] ~ dnorm(nMu[u,yr,4,s], nTau[u,yr,4,s])T(0,)
+
+      }
+
+      #  Totals in each year
+      yN[u,yr] <- N[u,yr,1,1] + N[u,yr,1,2]
+      frat[u,yr] <- N[u,yr,2,1] + N[u,yr,3,1] + N[u,yr,4,1]
+      totF[u,yr] <- N[u,yr,1,1] + frat[u, yr]
+      totM[u,yr] <- N[u,yr,1,2] + N[u,yr,2,2] + N[u,yr,3,2] + N[u,yr,4,2]
+      totN[u,yr] <- totF[u,yr] + totM[u,yr]
+
+    }
+  }
+
+  ####################  Observation Models
+  #  Indexing/columns always follows
+  #    1   2     3    4    5    6
+  #  DAU, Year, Age, Sex, Mean, Tau
+
+  #  Abundance Observation - [dau, yr]
+  for(i in 1:nn){
+    ndat[i,5] ~ dnorm(totN[ndat[i,1],ndat[i,2]], ndat[i,6])T(0,)
+  }
+
+  #  Potential model for minimum counts
+  #  Need to add call to collector function in ipm_utility_funs.R
+  r ~ dunif(0, 5000)
+
+  for(i in 1:nmin){
+    mu[i] <- r/(r + totN[mindat[i,1],mindat[i,2]])
+    mindat[i,5] ~ dnegbin(mu[i], r)
+  }
+
+  #  Scat Abundance Males - [dau, yr]
+  for(i in 1:nnm){
+    nmdat[i,5] ~ dnorm(totM[nmdat[i,1], nmdat[i,2]], nmdat[i,6])
+  }
+
+  #  Scat Abundance Females - [dau, yr]
+  for(i in 1:nnf){
+    nfdat[i,5] ~ dnorm(totF[nfdat[i,1], nfdat[i,2]], nfdat[i,6])
+  }
+
+  #  Calf:Cow Ratio Observations
+  for(i in 1:nyf){
+    yfdat[i,5] ~ dnorm(R[yfdat[i,1], yfdat[i,2]], yfdat[i,6])
+  }
+
+  #  Male:Female Ratio Observations
+  for(i in 1:nmf){
+    mfdat[i,5] ~ dnorm(mf[mfdat[i,1],mfdat[i,2]], mfdat[i,6])
+  }
+
+  #  Survival Observations 
+  for(i in 1:ns){
+    sdat[i,5] ~ dnorm(S[sdat[i,1], sdat[i,2], 4, 1], sdat[i,6])T(0,1)
+  }
+
+  #  Scat Survival Observations
+  for(i in 1:nss){
+    ssdat[i,5] ~ dnorm(S[ssdat[i,1], ssdat[i,2], ssdat[i,3], ssdat[i,4]],
+                       ssdat[i,6])T(0,1)
+  }
+
+  #  Derived - the constant is added to avoid division by 0
+  for(u in 1:ndau){
+    for(yr in 1:nyr){
+      yf[u,yr] <- (yN[u,yr] + 0.001)/abs(N[u,yr,4,1] + 0.001)
+      mf[u,yr] <- (totM[u,yr] + 0.001)/abs(totF[u,yr] + 0.001)
+    }
+  }
+
+  for(u in 1:ndau){
+    lambda[u,1] <- 1
+    for(yr in 2:nyr){
+      lambda[u,yr] <- (totF[u,yr] + 0.001)/abs(totF[u,yr-1] + 0.001)
+      logla[u,yr] <- log(ifelse(lambda[u,yr] < 0.0001, 0.01, lambda[u,yr]))
+    }
+  }
+}
